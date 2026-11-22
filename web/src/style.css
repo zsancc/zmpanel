@@ -1,0 +1,201 @@
+@import "tailwindcss";
+
+:root,
+[data-theme="light"] {
+  --zm-bg: #f4f6f9;
+  --zm-surface: #ffffff;
+  --zm-surface-elevated: #f8fafc;
+  --zm-sidebar: #0f172a;
+  --zm-sidebar-text: #cbd5e1;
+  --zm-sidebar-muted: #64748b;
+  --zm-sidebar-hover: rgba(255, 255, 255, 0.08);
+  --zm-border: #e2e8f0;
+  --zm-text: #0f172a;
+  --zm-text-muted: #64748b;
+  --zm-accent: #10b981;
+  --zm-accent-soft: rgba(16, 185, 129, 0.12);
+  --zm-danger: #ef4444;
+  --zm-warning: #f59e0b;
+  --zm-info: #3b82f6;
+  --zm-term-bg: #0f172a;
+  --zm-term-fg: #e2e8f0;
+  --zm-is-dark: 0;
+}
+
+[data-theme="dark"] {
+  --zm-bg: #0b0f17;
+  --zm-surface: #131926;
+  --zm-surface-elevated: #1b2436;
+  --zm-sidebar: #090d14;
+  --zm-sidebar-text: #cbd5e1;
+  --zm-sidebar-muted: #64748b;
+  --zm-sidebar-hover: rgba(255, 255, 255, 0.06);
+  --zm-border: #232f45;
+  --zm-text: #f1f5f9;
+  --zm-text-muted: #94a3b8;
+  --zm-term-bg: #080c13;
+  --zm-term-fg: #e2e8f0;
+  --zm-is-dark: 1;
+}
+
+[data-theme="aurora"] {
+  --zm-bg: #0d1321;
+  --zm-surface: #151e32;
+  --zm-surface-elevated: #1d2942;
+  --zm-sidebar: #090e1a;
+  --zm-sidebar-text: #dbeafe;
+  --zm-sidebar-muted: #60a5fa;
+  --zm-sidebar-hover: rgba(96, 165, 250, 0.12);
+  --zm-border: #253658;
+  --zm-text: #eff6ff;
+  --zm-text-muted: #93c5fd;
+  --zm-term-bg: #090f1d;
+  --zm-term-fg: #dbeafe;
+  --zm-is-dark: 1;
+}
+
+[data-theme="forest"] {
+  --zm-bg: #0c1713;
+  --zm-surface: #12221c;
+  --zm-surface-elevated: #193028;
+  --zm-sidebar: #08110e;
+  --zm-sidebar-text: #d1fae5;
+  --zm-sidebar-muted: #6ee7b7;
+  --zm-sidebar-hover: rgba(52, 211, 153, 0.12);
+  --zm-border: #214034;
+  --zm-text: #ecfdf5;
+  --zm-text-muted: #a7f3d0;
+  --zm-term-bg: #08120e;
+  --zm-term-fg: #d1fae5;
+  --zm-is-dark: 1;
+}
+
+[data-theme="paper"] {
+  --zm-bg: #f5f2eb;
+  --zm-surface: #fffdf8;
+  --zm-surface-elevated: #f1ece1;
+  --zm-sidebar: #26231e;
+  --zm-sidebar-text: #e7e1d6;
+  --zm-sidebar-muted: #a39b8b;
+  --zm-sidebar-hover: rgba(255, 255, 255, 0.08);
+  --zm-border: #e3dccb;
+  --zm-text: #1f1c18;
+  --zm-text-muted: #6b6357;
+  --zm-term-bg: #1e1c18;
+  --zm-term-fg: #f3ede1;
+  --zm-is-dark: 0;
+}
+
+[data-theme="matrix"] {
+  --zm-bg: #050806;
+  --zm-surface: #0b110d;
+  --zm-surface-elevated: #111c15;
+  --zm-sidebar: #030604;
+  --zm-sidebar-text: #bbf7d0;
+  --zm-sidebar-muted: #4ade80;
+  --zm-sidebar-hover: rgba(34, 197, 94, 0.14);
+  --zm-border: #193221;
+  --zm-text: #dcfce7;
+  --zm-text-muted: #86efac;
+  --zm-term-bg: #030604;
+  --zm-term-fg: #4ade80;
+  --zm-is-dark: 1;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: var(--zm-bg);
+  color: var(--zm-text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+.zm-card {
+  background: var(--zm-surface);
+  border: 1px solid var(--zm-border);
+  border-radius: 0.75rem;
+}
+
+.zm-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  padding: 0.45rem 0.9rem;
+  border-radius: 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  border: 1px solid var(--zm-border);
+  background: var(--zm-surface-elevated);
+  color: var(--zm-text);
+  transition: opacity 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.zm-btn:hover {
+  border-color: var(--zm-accent);
+}
+
+.zm-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.zm-btn-primary {
+  background: var(--zm-accent);
+  border-color: var(--zm-accent);
+  color: #ffffff;
+}
+
+.zm-btn-primary:hover {
+  opacity: 0.92;
+}
+
+.zm-btn-danger {
+  background: rgba(239, 68, 68, 0.12);
+  border-color: rgba(239, 68, 68, 0.35);
+  color: var(--zm-danger);
+}
+
+.zm-btn-danger:hover {
+  background: var(--zm-danger);
+  color: #ffffff;
+}
+
+.zm-input {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--zm-border);
+  background: var(--zm-surface-elevated);
+  color: var(--zm-text);
+  font-size: 0.875rem;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.zm-input:focus {
+  border-color: var(--zm-accent);
+}
+
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--zm-border);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}

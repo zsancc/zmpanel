@@ -1,0 +1,25 @@
+# Rust
+/target
+Cargo.lock
+
+# Frontend
+/web/node_modules
+/web/dist
+/web/.vite
+
+# Runtime & dev data
+/dev-data
+/zmpanel-data
+/dist-release
+/.multi-cli
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.local
+
+# IDE & OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

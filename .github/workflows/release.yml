@@ -1,0 +1,123 @@
+name: Build & Release Linux Static Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v0.1.0)'
+        required: true
+        default: 'v0.1.0'
+
+permissions:
+  contents: write
+
+jobs:
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Build Vue 3 frontend
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+  build-linux-musl:
+    needs: build-frontend
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            linker_pkg: musl-tools
+            cc: musl-gcc
+          - target: aarch64-unknown-linux-musl
+            linker_pkg: gcc-aarch64-linux-gnu
+            cc: aarch64-linux-gnu-gcc
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - name: Install musl cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.linker_pkg }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: Build static single binary (${{ matrix.target }})
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          cargo build --release --target ${{ matrix.target }} -p zmpanel-server
+      - name: Prepare release assets & manifest
+        run: |
+          mkdir -p release-out
+          TAG="${GITHUB_REF_NAME}"
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          fi
+          VER="${TAG#v}"
+          ASSET="zmpanel-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/zmpanel" "release-out/${ASSET}"
+          chmod +x "release-out/${ASSET}"
+          SHA="$(sha256sum "release-out/${ASSET}" | awk '{print $1}')"
+          echo "${SHA}  ${ASSET}" > "release-out/${ASSET}.sha256"
+          cat > "release-out/release-manifest-${{ matrix.target }}.json" <<EOF
+          {
+            "version": "${VER}",
+            "changelog": "zmpanel ${TAG} (${{ matrix.target }} static musl single binary)",
+            "download_url": "https://github.com/${{ github.repository }}/releases/download/${TAG}/${ASSET}",
+            "sha256": "${SHA}"
+          }
+          EOF
+          ls -lh release-out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: release-out/*
+
+  publish-release:
+    needs: build-linux-musl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: all-assets
+          merge-multiple: true
+      - name: Determine tag name
+        id: tag
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            echo "name=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          generate_release_notes: true
+          files: all-assets/*
