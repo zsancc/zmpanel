@@ -431,6 +431,34 @@ impl Database {
         .optional()
     }
 
+    pub fn find_primary_admin(&self) -> rusqlite::Result<Option<UserRecord>> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        conn.query_row(
+            "SELECT id, username, password_hash, totp_secret, totp_enabled FROM users ORDER BY id ASC LIMIT 1",
+            [],
+            |r| {
+                Ok(UserRecord {
+                    id: r.get(0)?,
+                    username: r.get(1)?,
+                    password_hash: r.get(2)?,
+                    totp_secret: r.get(3)?,
+                    totp_enabled: r.get::<_, i64>(4)? != 0,
+                })
+            },
+        )
+        .optional()
+    }
+
+    pub fn update_username(&self, user_id: i64, new_username: &str) -> rusqlite::Result<()> {
+        let conn = self.conn.lock().expect("db lock poisoned");
+        let now = Utc::now().timestamp();
+        conn.execute(
+            "UPDATE users SET username = ?1, updated_at = ?2 WHERE id = ?3",
+            params![new_username, now, user_id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_user_password(&self, user_id: i64, password_hash: &str) -> rusqlite::Result<()> {
         let conn = self.conn.lock().expect("db lock poisoned");
         let now = Utc::now().timestamp();

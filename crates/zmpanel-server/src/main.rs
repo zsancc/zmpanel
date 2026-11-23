@@ -1,5 +1,5 @@
-use anyhow::Result;
-use clap::{Parser, ValueEnum};
+use anyhow::{Result, bail};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
@@ -23,9 +23,37 @@ impl From<CliMode> for RunMode {
     }
 }
 
+#[derive(Debug, Subcommand)]
+enum AdminCmd {
+    /// 查看当前面板安全入口、管理员用户名与 2FA 状态
+    Info,
+    /// 修改面板安全入口（传 random 随机生成，传 none 关闭入口）
+    SetEntry {
+        /// 新入口路径（如 /my_panel、random 或 none）
+        entry: String,
+    },
+    /// 修改主管理员用户名
+    SetUsername {
+        /// 新用户名（3~32 位字母/数字/下划线/连字符）
+        username: String,
+    },
+    /// 重置主管理员密码（留空则自动生成强随机密码）
+    ResetPassword {
+        /// 指定新密码（至少 6 位）；不传则自动生成 14 位随机密码
+        #[arg(long)]
+        password: Option<String>,
+    },
+    /// 应急关闭主管理员 TOTP 2FA 二步验证
+    #[command(name = "disable-2fa")]
+    Disable2fa,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "zmpanel", version, about = "轻量、安全、无外联的现代化 Linux 运维面板")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<AdminCmd>,
+
     /// 运行模式: standalone / master / agent
     #[arg(long, value_enum, default_value = "standalone", env = "ZMPANEL_MODE")]
     mode: CliMode,
@@ -39,7 +67,7 @@ struct Cli {
     port: u16,
 
     /// 数据与配置存储目录
-    #[arg(long, default_value = "./zmpanel-data", env = "ZMPANEL_DATA_DIR")]
+    #[arg(long, global = true, default_value = "./zmpanel-data", env = "ZMPANEL_DATA_DIR")]
     data_dir: PathBuf,
 
     /// 显式指定安全入口路径（留空则读取数据库或首次自动随机生成）
@@ -64,13 +92,19 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    // Handle offline/local admin CLI subcommands immediately without starting Tokio or web server.
+    if let Some(cmd) = cli.command {
+        return run_admin_command(&cli.data_dir, cmd);
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
-    let cli = Cli::parse();
     let run_mode: RunMode = cli.mode.into();
     std::fs::create_dir_all(&cli.data_dir)?;
 
@@ -190,5 +224,104 @@ async fn async_main(cli: Cli, run_mode: RunMode, db: Database) -> Result<()> {
     println!("============================================================");
 
     axum::serve(listener, app).await?;
+    Ok(())
+}
+
+fn run_admin_command(data_dir: &std::path::Path, cmd: AdminCmd) -> Result<()> {
+    let db_path = data_dir.join("zmpanel.db");
+    if !db_path.exists() {
+        bail!(
+            "未找到面板数据库: {}（请确认 --data-dir 路径是否正确，且面板已初始化过）",
+            db_path.display()
+        );
+    }
+    let db = Database::open(&db_path)?;
+
+    match cmd {
+        AdminCmd::Info => {
+            let entry = db
+                .get_setting("security_entry")?
+                .unwrap_or_default();
+            let admin = db.find_primary_admin()?;
+            println!("VERSION={}", env!("CARGO_PKG_VERSION"));
+            println!("ENTRY={}", entry);
+            match admin {
+                Some(u) => {
+                    println!("USERNAME={}", u.username);
+                    println!("TOTP_ENABLED={}", if u.totp_enabled { "true" } else { "false" });
+                }
+                None => {
+                    println!("USERNAME=(未初始化)");
+                    println!("TOTP_ENABLED=false");
+                }
+            }
+        }
+        AdminCmd::SetEntry { entry } => {
+            let trimmed = entry.trim();
+            let normalized = if trimmed.eq_ignore_ascii_case("none") || trimmed == "/" || trimmed.is_empty() {
+                String::new()
+            } else if trimmed.eq_ignore_ascii_case("random") {
+                format!("/zm_{}", auth::generate_alnum(8))
+            } else {
+                let clean = trimmed.trim_matches('/');
+                if clean.contains('/') || clean.contains(' ') || clean.contains("..") {
+                    bail!("安全入口仅支持单级路径（不含空格或斜杠），例如 my_panel");
+                }
+                format!("/{}", clean)
+            };
+            db.set_setting("security_entry", &normalized)?;
+            let _ = db.write_audit("cli", "127.0.0.1", "cli.set_entry", "security_entry", &normalized);
+            if normalized.is_empty() {
+                println!("已关闭安全入口限制（直接访问根路径 / 即可进入面板）");
+            } else {
+                println!("安全入口已更新为: {}", normalized);
+            }
+        }
+        AdminCmd::SetUsername { username } => {
+            let clean = username.trim();
+            if clean.len() < 3 || clean.len() > 32
+                || !clean.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                bail!("用户名需为 3~32 位字母、数字、下划线或连字符");
+            }
+            let Some(admin) = db.find_primary_admin()? else {
+                bail!("数据库中尚未初始化管理员账号");
+            };
+            db.update_username(admin.id, clean)?;
+            db.delete_user_sessions(admin.id)?;
+            let _ = db.write_audit("cli", "127.0.0.1", "cli.set_username", clean, "通过命令行修改管理员用户名");
+            println!("管理员用户名已修改为: {}（已清理旧登录会话）", clean);
+        }
+        AdminCmd::ResetPassword { password } => {
+            let new_pass = match password {
+                Some(p) => {
+                    let t = p.trim().to_string();
+                    if t.len() < 6 {
+                        bail!("新密码长度至少为 6 位");
+                    }
+                    t
+                }
+                None => auth::generate_alnum(14),
+            };
+            let Some(admin) = db.find_primary_admin()? else {
+                bail!("数据库中尚未初始化管理员账号");
+            };
+            let hash = auth::hash_password(&new_pass)?;
+            db.update_user_password(admin.id, &hash)?;
+            db.delete_user_sessions(admin.id)?;
+            let _ = db.write_audit("cli", "127.0.0.1", "cli.reset_password", &admin.username, "通过命令行重置管理员密码");
+            println!("管理员 [{}] 密码已重置！", admin.username);
+            println!("新密码: {}", new_pass);
+        }
+        AdminCmd::Disable2fa => {
+            let Some(admin) = db.find_primary_admin()? else {
+                bail!("数据库中尚未初始化管理员账号");
+            };
+            db.update_user_totp(admin.id, None, false)?;
+            db.delete_user_sessions(admin.id)?;
+            let _ = db.write_audit("cli", "127.0.0.1", "cli.disable_2fa", &admin.username, "通过命令行关闭 2FA");
+            println!("已关闭管理员 [{}] 的 2FA 二步验证（已清理旧登录会话）", admin.username);
+        }
+    }
     Ok(())
 }
