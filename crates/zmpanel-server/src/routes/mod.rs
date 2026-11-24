@@ -94,6 +94,7 @@ fn build_inner_router(state: AppState) -> Router {
         )
         // Stage 2: Docker Workspace & Containers
         .route("/docker/status", get(docker::status))
+        .route("/docker/install", post(docker::install_engine))
         .route("/docker/containers", get(docker::list_containers))
         .route(
             "/docker/containers/{id}/action",
@@ -171,6 +172,12 @@ fn build_inner_router(state: AppState) -> Router {
         .route("/security/scan", post(security::scan_now))
         .route("/security/analyze", post(security::analyze_sample))
         .route("/security/ssh", put(security::update_ssh_hardening))
+        .route("/security/vuln/scan", post(security::scan_vulnerabilities))
+        .route("/security/vuln/fix", post(security::fix_vulnerabilities))
+        .route(
+            "/security/vuln/config",
+            get(security::get_vuln_watch_config).put(security::save_vuln_watch_config),
+        )
         // Stage 3: Log Center
         .route("/logs/sources", get(logs::list_sources))
         .route("/logs/tail", get(logs::tail_log))

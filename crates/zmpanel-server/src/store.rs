@@ -13,6 +13,18 @@ use crate::runtime_env;
 
 const BUILTIN_CATALOG_TOML: &str = r#"
 [[apps]]
+id = "docker"
+name = "Docker 引擎 (含 Compose)"
+category = "容器运行环境"
+description = "轻量容器化运行与 Compose 编排引擎，自动校验宿主机是否支持嵌套（禁止在 OpenVZ / Docker 鸡套娃）。"
+min_mem_mb = 256
+supported_os = ["debian", "ubuntu", "alpine"]
+install_modes = ["native"]
+binary = "docker"
+version_args = ["--version"]
+has_manager = false
+
+[[apps]]
 id = "nginx"
 name = "Nginx"
 category = "Web 服务器"
@@ -224,6 +236,9 @@ pub fn install_native_app(app_id: &str) -> Result<String, AppError> {
 
     #[cfg(target_os = "linux")]
     {
+        if app_id == "docker" {
+            return crate::docker::install_docker_engine();
+        }
         let os = detect_os_family();
         let pkg = match (os.as_str(), app_id) {
             ("alpine", "nginx") => "nginx",

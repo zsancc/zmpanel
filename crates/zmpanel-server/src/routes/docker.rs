@@ -57,6 +57,23 @@ pub async fn status(
     Ok(Json(ApiResponse::success(st)))
 }
 
+pub async fn install_engine(
+    State(state): State<AppState>,
+    auth: AuthUser,
+) -> ServerResult<Json<ApiResponse<String>>> {
+    let out = tokio::task::spawn_blocking(docker::install_docker_engine)
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))??;
+    let _ = state.db.write_audit(
+        &auth.user.username,
+        &auth.client_ip,
+        "docker.install",
+        "docker",
+        "一键安装 Docker 引擎与 Compose",
+    );
+    Ok(Json(ApiResponse::success(out)))
+}
+
 pub async fn list_containers(
     _auth: AuthUser,
     Query(q): Query<ContainerListQuery>,

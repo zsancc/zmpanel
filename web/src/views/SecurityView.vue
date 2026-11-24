@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { Ban, CheckCircle2, Lock, Plus, RefreshCw, ShieldAlert, Trash2, Unlock } from 'lucide-vue-next'
 import { apiRequest, formatTimestamp } from '@/api/client'
 
@@ -50,7 +51,68 @@ interface SshHardeningStatus {
   pubkey_auth: boolean
 }
 
-const activeTab = ref<'bans' | 'events' | 'rules' | 'ssh'>('bans')
+interface VulnPackageItem {
+  package: string
+  category: string
+  severity: string
+  current_version: string
+  candidate_version: string
+  is_security_repo: boolean
+  advisory: string
+  cves?: string[]
+}
+
+interface SecurityBaselineCheck {
+  id: string
+  category: string
+  title: string
+  severity: string
+  status: string
+  detail: string
+  remediation: string
+  cves?: string[]
+}
+
+interface VulnWatchConfig {
+  enabled: boolean
+  interval_hours: number
+  alert_min_severity: string
+  auto_fix_non_kernel: boolean
+  last_scan_at: number
+  last_alert_at: number
+  last_summary: string
+}
+
+interface VulnScanReport {
+  scanned_at: number
+  os_family: string
+  kernel_running: string
+  reboot_required: boolean
+  security_score: number
+  critical_count: number
+  high_count: number
+  total_upgradable: number
+  packages: VulnPackageItem[]
+  baselines: SecurityBaselineCheck[]
+  summary: string
+}
+
+const router = useRouter()
+const activeTab = ref<'bans' | 'vuln' | 'events' | 'rules' | 'ssh'>('bans')
+const vulnReport = ref<VulnScanReport | null>(null)
+const vulnWatch = ref<VulnWatchConfig>({
+  enabled: false,
+  interval_hours: 6,
+  alert_min_severity: 'high',
+  auto_fix_non_kernel: false,
+  last_scan_at: 0,
+  last_alert_at: 0,
+  last_summary: '',
+})
+const vulnScanning = ref(false)
+const vulnFixing = ref(false)
+const selectedPkgs = ref<string[]>([])
+const fixOutput = ref('')
 const config = ref<SecurityConfig>({
   enabled: true,
   ssh_guard_enabled: true,
@@ -86,6 +148,106 @@ const CATEGORY_MAP: Record<string, string> = {
   web: '异常 Web',
   manual: '手动封禁',
   system: '系统',
+}
+
+const VULN_CAT_MAP: Record<string, string> = {
+  kernel: 'Linux 内核',
+  privilege: '提权/核心库',
+  ssh: 'OpenSSH',
+  web: 'Nginx / TLS',
+  runtime: 'Node.js / 运行时',
+  container: 'Docker 容器',
+  database: '数据库',
+  network: '网络暴露',
+  system: '系统包',
+}
+
+const SEV_MAP: Record<string, { label: string; color: string; bg: string }> = {
+  critical: { label: '严重', color: '#f43f5e', bg: 'rgba(244,63,94,0.14)' },
+  high: { label: '高危', color: '#f97316', bg: 'rgba(249,115,22,0.14)' },
+  medium: { label: '中危', color: '#eab308', bg: 'rgba(234,179,8,0.14)' },
+  low: { label: '低危', color: '#64748b', bg: 'rgba(100,116,139,0.14)' },
+  info: { label: '提示', color: '#38bdf8', bg: 'rgba(56,189,248,0.14)' },
+  pass: { label: '通过', color: '#10b981', bg: 'rgba(16,185,129,0.14)' },
+}
+
+function cveUrl(id: string): string {
+  if (id.startsWith('CVE-')) return `https://nvd.nist.gov/vuln/detail/${encodeURIComponent(id)}`
+  if (id.startsWith('DSA-')) return `https://security-tracker.debian.org/tracker/${encodeURIComponent(id)}`
+  if (id.startsWith('USN-')) return `https://ubuntu.com/security/notices/${encodeURIComponent(id)}`
+  return `https://nvd.nist.gov/vuln/search/results?query=${encodeURIComponent(id)}`
+}
+
+async function loadVulnWatchConfig() {
+  try {
+    vulnWatch.value = await apiRequest<VulnWatchConfig>('/security/vuln/config')
+  } catch {
+    // ignore if unavailable
+  }
+}
+
+async function saveVulnWatchConfig() {
+  errorMsg.value = ''
+  try {
+    vulnWatch.value = await apiRequest<VulnWatchConfig>('/security/vuln/config', {
+      method: 'PUT',
+      body: JSON.stringify(vulnWatch.value),
+    })
+    notice.value = '定时 CVE 巡检与高危告警策略已保存并生效'
+  } catch (err: any) {
+    errorMsg.value = err?.message || '保存漏洞巡检策略失败'
+  }
+}
+
+async function runVulnScan(refreshIndex = false) {
+  vulnScanning.value = true
+  errorMsg.value = ''
+  try {
+    vulnReport.value = await apiRequest<VulnScanReport>('/security/vuln/scan', {
+      method: 'POST',
+      body: JSON.stringify({ refresh_index: refreshIndex }),
+    })
+    selectedPkgs.value = vulnReport.value.packages
+      .filter((p) => p.severity === 'critical' || p.severity === 'high' || p.is_security_repo)
+      .map((p) => p.package)
+    if (refreshIndex) {
+      notice.value = vulnReport.value.summary
+    }
+  } catch (err: any) {
+    errorMsg.value = err?.message || '执行漏洞扫描失败'
+  } finally {
+    vulnScanning.value = false
+  }
+}
+
+function togglePkg(pkg: string) {
+  if (selectedPkgs.value.includes(pkg)) {
+    selectedPkgs.value = selectedPkgs.value.filter((p) => p !== pkg)
+  } else {
+    selectedPkgs.value.push(pkg)
+  }
+}
+
+async function fixPackages(pkgs: string[], fixAllSecurity = false) {
+  const tip = fixAllSecurity
+    ? '确定一键升级所有高危及安全通道 (-security) 漏洞补丁吗？（自动保留现有配置文件）'
+    : `确定升级修复选中的 ${pkgs.length} 个软件包（${pkgs.slice(0, 5).join(', ')}${pkgs.length > 5 ? '...' : ''}）吗？`
+  if (!window.confirm(tip)) return
+  vulnFixing.value = true
+  errorMsg.value = ''
+  fixOutput.value = '正在执行安全补丁升级，请稍候...'
+  try {
+    fixOutput.value = await apiRequest<string>('/security/vuln/fix', {
+      method: 'POST',
+      body: JSON.stringify({ packages: pkgs, fix_all_security: fixAllSecurity }),
+    })
+    notice.value = '安全补丁修复已完成，已自动刷新最新漏洞扫描结果'
+    await runVulnScan(false)
+  } catch (err: any) {
+    errorMsg.value = err?.message || '漏洞修复执行失败'
+  } finally {
+    vulnFixing.value = false
+  }
 }
 
 async function loadOverview() {
@@ -200,7 +362,11 @@ async function applySsh() {
   }
 }
 
-onMounted(loadOverview)
+onMounted(() => {
+  loadOverview()
+  loadVulnWatchConfig()
+  runVulnScan(false)
+})
 </script>
 
 <template>
@@ -250,6 +416,16 @@ onMounted(loadOverview)
     <div class="flex flex-wrap gap-2">
       <button class="zm-btn !py-1.5 text-xs" :class="{ 'zm-btn-primary': activeTab === 'bans' }" @click="activeTab = 'bans'">
         <Ban class="h-3.5 w-3.5" /> 封禁列表 ({{ bans.length }})
+      </button>
+      <button class="zm-btn !py-1.5 text-xs" :class="{ 'zm-btn-primary': activeTab === 'vuln' }" @click="activeTab = 'vuln'">
+        <ShieldAlert class="h-3.5 w-3.5" /> 漏洞扫描与修复
+        <span
+          v-if="vulnReport && (vulnReport.critical_count + vulnReport.high_count) > 0"
+          class="ml-1 rounded-full px-1.5 py-0.2 text-[10px] font-bold"
+          style="background: rgba(244,63,94,0.2); color: #f43f5e"
+        >
+          {{ vulnReport.critical_count + vulnReport.high_count }}
+        </span>
       </button>
       <button class="zm-btn !py-1.5 text-xs" :class="{ 'zm-btn-primary': activeTab === 'events' }" @click="activeTab = 'events'">
         拦截事件时间线 ({{ events.length }})
@@ -322,6 +498,250 @@ onMounted(loadOverview)
             </tr>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- Tab 2: Vulnerability Scan & One-Click Fix -->
+    <div v-if="activeTab === 'vuln'" class="space-y-4 text-xs">
+      <div class="zm-card p-4 flex flex-wrap items-center justify-between gap-3">
+        <div class="space-y-1">
+          <div class="font-semibold text-sm flex items-center gap-2">
+            <span>系统漏洞扫描与安全基线体检</span>
+            <span
+              v-if="vulnReport"
+              class="rounded-full px-2 py-0.5 text-xs font-bold"
+              :style="
+                vulnReport.security_score >= 85
+                  ? { background: 'rgba(16,185,129,0.14)', color: '#10b981' }
+                  : vulnReport.security_score >= 60
+                    ? { background: 'rgba(245,158,11,0.14)', color: '#f59e0b' }
+                    : { background: 'rgba(244,63,94,0.14)', color: '#f43f5e' }
+              "
+            >
+              安全评分 {{ vulnReport.security_score }} / 100
+            </span>
+          </div>
+          <p class="opacity-75 m-0">
+            {{
+              vulnReport
+                ? `${vulnReport.summary}（内核: ${vulnReport.kernel_running} · 发行版: ${vulnReport.os_family}）`
+                : '覆盖 Linux 内核、sudo/polkit/glibc 提权组件、OpenSSH、Nginx/OpenSSL、Node.js、Docker 及公网高危端口暴露体检'
+            }}
+          </p>
+        </div>
+        <div class="flex flex-wrap gap-2">
+          <button class="zm-btn text-xs" :disabled="vulnScanning" @click="runVulnScan(true)">
+            <RefreshCw class="h-3.5 w-3.5" :class="{ 'animate-spin': vulnScanning }" />
+            {{ vulnScanning ? '正在刷新源并扫描...' : '刷新官方源并全面扫描' }}
+          </button>
+          <button
+            class="zm-btn zm-btn-primary text-xs"
+            :disabled="vulnFixing || !vulnReport || vulnReport.packages.length === 0"
+            @click="fixPackages([], true)"
+          >
+            {{ vulnFixing ? '修复中...' : '一键修复全部高危/安全补丁' }}
+          </button>
+        </div>
+      </div>
+
+      <div
+        v-if="vulnReport?.reboot_required"
+        class="zm-card p-3.5 text-xs"
+        style="border-color: var(--zm-warning); color: var(--zm-warning)"
+      >
+        系统检测到 /var/run/reboot-required：已有新内核或核心库安全补丁安装完成，请择机重启服务器以使补丁正式生效。
+      </div>
+
+      <!-- Scheduled CVE Watcher & High-Severity Alert Policy -->
+      <div class="zm-card p-4 space-y-3">
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <div class="font-semibold">定时 CVE 自动巡检与高危告警（默认仅严重/高危告警，中危/低危静音）</div>
+            <div class="text-[11px] opacity-70 mt-0.5">
+              自动刷新官方安全索引检测新 CVE，同版本去重仅告警一次；需在
+              <button class="underline cursor-pointer" style="color: var(--zm-accent)" @click="router.push('/settings')">
+                系统设置 → 告警通知
+              </button>
+              配置 Telegram 或 Webhook 通道
+            </div>
+          </div>
+          <button class="zm-btn zm-btn-primary !py-1.5 text-xs" @click="saveVulnWatchConfig">
+            <CheckCircle2 class="h-3.5 w-3.5" /> 保存巡检策略
+          </button>
+        </div>
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-3 items-center">
+          <label class="flex items-center gap-2 cursor-pointer font-medium">
+            <input v-model="vulnWatch.enabled" type="checkbox" />
+            开启后台定时 CVE 巡检
+          </label>
+          <div>
+            <label class="block mb-1 opacity-75">巡检周期</label>
+            <select v-model.number="vulnWatch.interval_hours" class="zm-input">
+              <option :value="1">每 1 小时</option>
+              <option :value="3">每 3 小时</option>
+              <option :value="6">每 6 小时（推荐）</option>
+              <option :value="12">每 12 小时</option>
+              <option :value="24">每 24 小时</option>
+            </select>
+          </div>
+          <div>
+            <label class="block mb-1 opacity-75">推送告警阈值</label>
+            <select v-model="vulnWatch.alert_min_severity" class="zm-input">
+              <option value="high">仅严重 + 高危告警（中危/低危不告警）</option>
+              <option value="critical">仅严重漏洞告警（Critical）</option>
+            </select>
+          </div>
+          <label class="flex items-center gap-2 cursor-pointer pt-4">
+            <input v-model="vulnWatch.auto_fix_non_kernel" type="checkbox" />
+            <span>自动静默修复非内核高危安全包</span>
+          </label>
+        </div>
+        <div v-if="vulnWatch.last_scan_at > 0" class="text-[11px] opacity-65 flex flex-wrap gap-4">
+          <span>上次自动巡检: {{ formatTimestamp(vulnWatch.last_scan_at) }}</span>
+          <span v-if="vulnWatch.last_alert_at > 0">上次高危告警: {{ formatTimestamp(vulnWatch.last_alert_at) }}</span>
+        </div>
+      </div>
+
+      <div v-if="fixOutput" class="zm-card p-3 space-y-1.5">
+        <div class="flex items-center justify-between font-semibold">
+          <span>补丁修复执行日志</span>
+          <button class="opacity-60 hover:opacity-100 cursor-pointer" @click="fixOutput = ''">清空</button>
+        </div>
+        <pre
+          class="p-2.5 rounded-lg text-[11px] font-mono overflow-auto max-h-56 m-0"
+          style="background: var(--zm-term-bg); color: var(--zm-term-fg)"
+        >{{ fixOutput }}</pre>
+      </div>
+
+      <!-- Upgradable Security Packages -->
+      <div v-if="vulnReport" class="zm-card overflow-hidden">
+        <div class="px-4 py-3 border-b flex flex-wrap items-center justify-between gap-2" style="border-color: var(--zm-border)">
+          <div class="font-semibold">
+            待修复 / 可升级软件包 ({{ vulnReport.packages.length }})
+          </div>
+          <button
+            v-if="selectedPkgs.length > 0"
+            class="zm-btn zm-btn-primary !py-1 text-xs"
+            :disabled="vulnFixing"
+            @click="fixPackages(selectedPkgs, false)"
+          >
+            批量修复已勾选 ({{ selectedPkgs.length }})
+          </button>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-xs text-left border-collapse">
+            <thead>
+              <tr class="border-b" style="border-color: var(--zm-border); background: var(--zm-surface-elevated); color: var(--zm-text-muted)">
+                <th class="py-2.5 px-3 w-8">选</th>
+                <th class="py-2.5 px-2">软件包</th>
+                <th class="py-2.5 px-2">风险等级</th>
+                <th class="py-2.5 px-2">分类</th>
+                <th class="py-2.5 px-2">当前版本 → 修复版本</th>
+                <th class="py-2.5 px-2">安全说明</th>
+                <th class="py-2.5 px-3 text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-if="vulnReport.packages.length === 0">
+                <td colspan="7" class="py-8 text-center opacity-65">
+                  当前未发现待升级的发行版软件包（可点击上方「刷新官方源并全面扫描」拉取最新安全索引）
+                </td>
+              </tr>
+              <tr v-for="p in vulnReport.packages" :key="p.package" class="border-b hover:bg-white/5" style="border-color: var(--zm-border)">
+                <td class="py-2 px-3">
+                  <input type="checkbox" :checked="selectedPkgs.includes(p.package)" @change="togglePkg(p.package)" />
+                </td>
+                <td class="py-2 px-2 font-mono font-semibold">
+                  {{ p.package }}
+                  <span
+                    v-if="p.is_security_repo"
+                    class="ml-1 rounded px-1 py-0.2 text-[10px]"
+                    style="background: rgba(244,63,94,0.12); color: #f43f5e"
+                  >
+                    security
+                  </span>
+                </td>
+                <td class="py-2 px-2">
+                  <span
+                    class="rounded px-1.5 py-0.5 text-[10px] font-semibold"
+                    :style="{ color: SEV_MAP[p.severity]?.color, background: SEV_MAP[p.severity]?.bg }"
+                  >
+                    {{ SEV_MAP[p.severity]?.label || p.severity }}
+                  </span>
+                </td>
+                <td class="py-2 px-2 whitespace-nowrap">{{ VULN_CAT_MAP[p.category] || p.category }}</td>
+                <td class="py-2 px-2 font-mono text-[11px]">
+                  <span class="opacity-65">{{ p.current_version || '-' }}</span>
+                  <span class="mx-1">→</span>
+                  <span style="color: var(--zm-accent)">{{ p.candidate_version }}</span>
+                </td>
+                <td class="py-2 px-2 opacity-80 max-w-sm space-y-1">
+                  <div>{{ p.advisory }}</div>
+                  <div v-if="p.cves && p.cves.length > 0" class="flex flex-wrap gap-1 pt-0.5">
+                    <a
+                      v-for="cve in p.cves"
+                      :key="cve"
+                      :href="cveUrl(cve)"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      class="rounded px-1.5 py-0.5 text-[10px] font-mono font-semibold hover:underline"
+                      style="background: rgba(244,63,94,0.14); color: #f43f5e"
+                    >
+                      {{ cve }}
+                    </a>
+                  </div>
+                </td>
+                <td class="py-2 px-3 text-right whitespace-nowrap">
+                  <button
+                    class="zm-btn !py-1 !px-2 text-[11px]"
+                    :disabled="vulnFixing"
+                    @click="fixPackages([p.package], false)"
+                  >
+                    一键修复
+                  </button>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Security Baseline Checks -->
+      <div v-if="vulnReport" class="zm-card p-4 space-y-3">
+        <div class="font-semibold">核心安全基线体检（内核 / 提权账户 / OpenSSH / Node.js / Nginx / 高危端口暴露）</div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <div
+            v-for="b in vulnReport.baselines"
+            :key="b.id"
+            class="rounded-lg p-3 space-y-1.5"
+            style="background: var(--zm-surface-elevated); border: 1px solid var(--zm-border)"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <span class="font-semibold">{{ b.title }}</span>
+              <span
+                class="rounded px-1.5 py-0.5 text-[10px] font-semibold shrink-0"
+                :style="{ color: SEV_MAP[b.severity]?.color, background: SEV_MAP[b.severity]?.bg }"
+              >
+                {{ SEV_MAP[b.severity]?.label || b.severity }}
+              </span>
+            </div>
+            <div class="opacity-80 leading-relaxed">{{ b.detail }}</div>
+            <div v-if="b.cves && b.cves.length > 0" class="flex flex-wrap gap-1">
+              <a
+                v-for="cve in b.cves"
+                :key="cve"
+                :href="cveUrl(cve)"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="rounded px-1.5 py-0.5 text-[10px] font-mono font-semibold hover:underline"
+                style="background: rgba(244,63,94,0.14); color: #f43f5e"
+              >
+                {{ cve }}
+              </a>
+            </div>
+            <div class="text-[11px] opacity-65">建议：{{ b.remediation }}</div>
+          </div>
+        </div>
       </div>
     </div>
 

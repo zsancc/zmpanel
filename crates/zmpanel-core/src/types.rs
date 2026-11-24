@@ -738,3 +738,80 @@ pub enum MasterToAgentMsg {
         target_version: String,
     },
 }
+
+// ---------- Vulnerability Scan & Security Baseline ----------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VulnPackageItem {
+    pub package: String,
+    /// kernel | privilege | ssh | web | runtime | container | database | system
+    pub category: String,
+    /// critical | high | medium | low
+    pub severity: String,
+    pub current_version: String,
+    pub candidate_version: String,
+    pub is_security_repo: bool,
+    pub advisory: String,
+    #[serde(default)]
+    pub cves: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityBaselineCheck {
+    pub id: String,
+    /// kernel | privilege | ssh | web | runtime | network
+    pub category: String,
+    pub title: String,
+    /// critical | high | medium | info | pass
+    pub severity: String,
+    /// risk | warn | pass
+    pub status: String,
+    pub detail: String,
+    pub remediation: String,
+    #[serde(default)]
+    pub cves: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VulnWatchConfig {
+    pub enabled: bool,
+    pub interval_hours: u32,
+    /// "high" (default: alert on critical + high, suppress medium/low) | "critical"
+    pub alert_min_severity: String,
+    pub auto_fix_non_kernel: bool,
+    #[serde(default)]
+    pub last_scan_at: i64,
+    #[serde(default)]
+    pub last_alert_at: i64,
+    #[serde(default)]
+    pub last_summary: String,
+}
+
+impl Default for VulnWatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_hours: 6,
+            alert_min_severity: "high".to_string(),
+            auto_fix_non_kernel: false,
+            last_scan_at: 0,
+            last_alert_at: 0,
+            last_summary: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VulnScanReport {
+    pub scanned_at: i64,
+    pub os_family: String,
+    pub kernel_running: String,
+    pub reboot_required: bool,
+    pub security_score: u8,
+    pub critical_count: usize,
+    pub high_count: usize,
+    pub total_upgradable: usize,
+    pub packages: Vec<VulnPackageItem>,
+    pub baselines: Vec<SecurityBaselineCheck>,
+    pub summary: String,
+}

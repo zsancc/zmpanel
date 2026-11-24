@@ -76,6 +76,97 @@ pub fn check_docker_status() -> DockerStatusResponse {
     }
 }
 
+/// Install Docker Engine & Compose natively via distribution package manager (Debian/Ubuntu/Alpine).
+/// Blocks installation on unprivileged Docker/OpenVZ/non-nesting LXC containers.
+pub fn install_docker_engine() -> Result<String, AppError> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        return Err(AppError::BadRequest(
+            "一键安装 Docker 引擎仅支持 Debian / Ubuntu / Alpine Linux 服务器".to_string(),
+        ));
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let env = runtime_env::detect_runtime_env(false);
+        if !env.docker_nesting_supported {
+            return Err(AppError::Forbidden(format!(
+                "已拦截安装：{}（{}）",
+                env.virt_label, env.docker_nesting_reason
+            )));
+        }
+
+        let os = crate::store::detect_os_family();
+        let mut logs = Vec::new();
+
+        if os == "alpine" {
+            let out = Command::new("apk")
+                .args(["add", "--no-cache", "docker", "docker-cli-compose"])
+                .output()
+                .map_err(|e| AppError::Internal(format!("执行 apk 安装 Docker 失败: {}", e)))?;
+            logs.push(format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+            if !out.status.success() {
+                return Err(AppError::BadRequest(format!(
+                    "Alpine 安装 Docker 失败:\n{}",
+                    logs.join("\n").trim()
+                )));
+            }
+            let _ = Command::new("rc-update").args(["add", "docker", "default"]).output();
+            let _ = Command::new("rc-service").args(["docker", "start"]).output();
+        } else {
+            let _ = Command::new("apt-get")
+                .args(["update", "-qq"])
+                .env("DEBIAN_FRONTEND", "noninteractive")
+                .output();
+            let out = Command::new("apt-get")
+                .args(["install", "-y", "docker.io"])
+                .env("DEBIAN_FRONTEND", "noninteractive")
+                .output()
+                .map_err(|e| AppError::Internal(format!("执行 apt-get 安装 docker.io 失败: {}", e)))?;
+            logs.push(format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            ));
+            if !out.status.success() {
+                return Err(AppError::BadRequest(format!(
+                    "安装 docker.io 失败:\n{}",
+                    logs.join("\n").trim()
+                )));
+            }
+
+            // Best-effort install Compose plugin (Debian 12/13 & Ubuntu package names vary across releases)
+            for compose_pkg in ["docker-compose-plugin", "docker-compose-v2", "docker-compose"] {
+                let c_out = Command::new("apt-get")
+                    .args(["install", "-y", compose_pkg])
+                    .env("DEBIAN_FRONTEND", "noninteractive")
+                    .output();
+                if let Ok(o) = c_out
+                    && o.status.success()
+                {
+                    logs.push(format!("[zmpanel] 已附带安装 {}", compose_pkg));
+                    break;
+                }
+            }
+
+            let _ = Command::new("systemctl")
+                .args(["enable", "--now", "docker"])
+                .output();
+        }
+
+        let st = check_docker_status();
+        logs.push(format!(
+            "[zmpanel] 安装完成检测: available={}, version={}, compose={}",
+            st.available, st.version, st.compose_available
+        ));
+        Ok(logs.join("\n").trim().to_string())
+    }
+}
+
 pub fn list_containers(include_all: bool) -> Result<Vec<DockerContainerInfo>, AppError> {
     let mut args = vec!["ps", "--format", "{{json .}}"];
     if include_all {

@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use tracing_subscriber::EnvFilter;
 use zmpanel_core::{PanelConfig, RunMode};
-use zmpanel_server::{auth, cluster, cron_jobs, db::Database, monitor, routes, security, state::AppState};
+use zmpanel_server::{auth, cluster, cron_jobs, db::Database, monitor, routes, security, state::AppState, vuln};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliMode {
@@ -201,6 +201,7 @@ async fn async_main(cli: Cli, run_mode: RunMode, db: Database) -> Result<()> {
     let state = AppState::new(config, db);
     monitor::spawn_monitor_task(state.clone());
     security::spawn_security_engine(state.clone());
+    vuln::spawn_vuln_watcher(state.clone());
     cron_jobs::spawn_cron_scheduler(state.clone());
 
     let app = routes::build_app(state);

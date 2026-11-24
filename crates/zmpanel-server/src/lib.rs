@@ -19,4 +19,5 @@ pub mod state;
 pub mod store;
 pub mod terminal;
 pub mod updater;
+pub mod vuln;
 pub mod websites;

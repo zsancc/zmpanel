@@ -75,6 +75,7 @@ const projects = ref<DockerProject[]>([])
 const containers = ref<DockerContainer[]>([])
 const images = ref<DockerImage[]>([])
 const busy = ref(false)
+const installingDocker = ref(false)
 const outputLog = ref('')
 const errorMsg = ref('')
 
@@ -250,6 +251,21 @@ async function pruneDocker() {
   }
 }
 
+async function installDockerEngine() {
+  if (!window.confirm('确定通过系统包管理器一键安装 Docker 引擎与 Compose 插件并启动服务吗？（约需 15~60 秒）')) return
+  installingDocker.value = true
+  errorMsg.value = ''
+  outputLog.value = '正在安装 Docker 引擎与 Compose，请稍候...'
+  try {
+    outputLog.value = await apiRequest<string>('/docker/install', { method: 'POST' })
+    await loadAll()
+  } catch (err: any) {
+    errorMsg.value = err?.message || '安装 Docker 引擎失败'
+  } finally {
+    installingDocker.value = false
+  }
+}
+
 onMounted(loadAll)
 </script>
 
@@ -325,10 +341,18 @@ onMounted(loadAll)
 
     <div
       v-else-if="status && !status.available"
-      class="zm-card p-3.5 text-xs"
+      class="zm-card p-3.5 text-xs flex flex-wrap items-center justify-between gap-3"
       style="border-color: var(--zm-warning); color: var(--zm-warning)"
     >
-      {{ status.message }}（你仍可先管理项目工作区目录与 Compose 文件）
+      <span>{{ status.message }}（你仍可先管理项目工作区目录与 Compose 文件）</span>
+      <button
+        class="zm-btn zm-btn-primary !py-1.5 text-xs shrink-0"
+        :disabled="installingDocker"
+        @click="installDockerEngine"
+      >
+        <Download class="h-3.5 w-3.5" />
+        {{ installingDocker ? '正在安装 Docker...' : '一键安装 Docker 引擎' }}
+      </button>
     </div>
 
     <div class="flex items-center gap-2">

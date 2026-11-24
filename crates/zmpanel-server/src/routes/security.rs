@@ -6,7 +6,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use zmpanel_core::{
     ApiResponse, AppError, SecurityBanItem, SecurityConfig, SecurityEventItem,
-    SecurityWhitelistItem, SshHardeningStatus,
+    SecurityWhitelistItem, SshHardeningStatus, VulnScanReport, VulnWatchConfig,
 };
 
 use crate::auth::AuthUser;
@@ -14,6 +14,7 @@ use crate::error::ServerResult;
 use crate::firewall;
 use crate::security;
 use crate::state::AppState;
+use crate::vuln;
 
 #[derive(Debug, Serialize)]
 pub struct SecurityOverviewResponse {
@@ -293,4 +294,99 @@ pub async fn update_ssh_hardening(
         &msg,
     );
     Ok(Json(ApiResponse::success(msg)))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VulnScanRequest {
+    #[serde(default)]
+    pub refresh_index: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VulnFixRequest {
+    #[serde(default)]
+    pub packages: Vec<String>,
+    #[serde(default)]
+    pub fix_all_security: bool,
+}
+
+pub async fn scan_vulnerabilities(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    payload: Option<Json<VulnScanRequest>>,
+) -> ServerResult<Json<ApiResponse<VulnScanReport>>> {
+    let refresh = payload.map(|p| p.refresh_index).unwrap_or(false);
+    let report = tokio::task::spawn_blocking(move || vuln::run_vuln_scan(refresh))
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let _ = state.db.write_audit(
+        &auth.user.username,
+        &auth.client_ip,
+        "security.vuln_scan",
+        &report.os_family,
+        &report.summary,
+    );
+    Ok(Json(ApiResponse::success(report)))
+}
+
+pub async fn fix_vulnerabilities(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(payload): Json<VulnFixRequest>,
+) -> ServerResult<Json<ApiResponse<String>>> {
+    let pkgs = payload.packages.clone();
+    let all_sec = payload.fix_all_security;
+    let out = tokio::task::spawn_blocking(move || vuln::fix_packages(&pkgs, all_sec))
+        .await
+        .map_err(|e| AppError::Internal(e.to_string()))??;
+    let target = if payload.packages.is_empty() {
+        "all-security".to_string()
+    } else {
+        payload.packages.join(",")
+    };
+    let _ = state.db.write_audit(
+        &auth.user.username,
+        &auth.client_ip,
+        "security.vuln_fix",
+        &target,
+        "执行漏洞安全补丁修复",
+    );
+    Ok(Json(ApiResponse::success(out)))
+}
+
+pub async fn get_vuln_watch_config(
+    State(state): State<AppState>,
+    _auth: AuthUser,
+) -> ServerResult<Json<ApiResponse<VulnWatchConfig>>> {
+    Ok(Json(ApiResponse::success(vuln::load_watch_config(&state))))
+}
+
+pub async fn save_vuln_watch_config(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(mut payload): Json<VulnWatchConfig>,
+) -> ServerResult<Json<ApiResponse<VulnWatchConfig>>> {
+    payload.interval_hours = payload.interval_hours.clamp(1, 168);
+    if payload.alert_min_severity != "critical" && payload.alert_min_severity != "high" {
+        payload.alert_min_severity = "high".to_string();
+    }
+    let existing = vuln::load_watch_config(&state);
+    payload.last_scan_at = existing.last_scan_at;
+    payload.last_alert_at = existing.last_alert_at;
+    payload.last_summary = existing.last_summary;
+    vuln::save_watch_config(&state, &payload)?;
+    let _ = state.db.write_audit(
+        &auth.user.username,
+        &auth.client_ip,
+        "security.vuln_watch_config",
+        "vuln_watcher",
+        &format!(
+            "enabled={}, interval={}h, alert_min={}, auto_fix={}",
+            payload.enabled,
+            payload.interval_hours,
+            payload.alert_min_severity,
+            payload.auto_fix_non_kernel
+        ),
+    );
+    Ok(Json(ApiResponse::success(payload)))
 }

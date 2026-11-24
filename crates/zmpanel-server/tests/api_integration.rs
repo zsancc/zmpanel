@@ -621,7 +621,14 @@ async fn test_stage2_ssl_websites_docker_store_and_backup_roundtrip() {
         .unwrap();
     assert_eq!(apps_resp.status(), StatusCode::OK);
     let apps_json = read_json(apps_resp).await;
-    assert!(apps_json["data"].as_array().unwrap().len() >= 5);
+    assert!(apps_json["data"].as_array().unwrap().len() >= 6);
+    assert!(
+        apps_json["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["id"] == "docker")
+    );
 
     let sec_resp = app
         .clone()
@@ -891,6 +898,63 @@ async fn test_stage3_firewall_security_ips_logs_cron_and_db_store() {
         .await
         .unwrap();
     let sec_json = read_json(sec_overview).await;
+
+    // Vulnerability & security baseline scan endpoint
+    let vuln_resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/zm_secret/api/security/vuln/scan")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, &auth_hdr)
+                .body(Body::from(json!({"refresh_index": false}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(vuln_resp.status(), StatusCode::OK);
+    let vuln_json = read_json(vuln_resp).await;
+    assert!(vuln_json["data"]["security_score"].as_u64().unwrap() <= 100);
+    assert!(!vuln_json["data"]["baselines"].as_array().unwrap().is_empty());
+
+    // Save & read scheduled CVE watch config (defaults to alerting only on high/critical)
+    let vw_save = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::PUT)
+                .uri("/zm_secret/api/security/vuln/config")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, &auth_hdr)
+                .body(Body::from(
+                    json!({
+                        "enabled": true,
+                        "interval_hours": 6,
+                        "alert_min_severity": "high",
+                        "auto_fix_non_kernel": false
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(vw_save.status(), StatusCode::OK);
+    let vw_get = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/zm_secret/api/security/vuln/config")
+                .header(header::AUTHORIZATION, &auth_hdr)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let vw_json = read_json(vw_get).await;
+    assert_eq!(vw_json["data"]["enabled"], true);
+    assert_eq!(vw_json["data"]["alert_min_severity"], "high");
     assert_eq!(sec_json["data"]["bans"].as_array().unwrap().len(), 3);
 
     // 3. Log Center: tail with keyword filter + truncate in-place
