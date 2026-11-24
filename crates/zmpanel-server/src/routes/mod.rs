@@ -53,6 +53,7 @@ fn build_inner_router(state: AppState) -> Router {
         .route("/system/processes", get(system::get_processes))
         .route("/system/processes/{pid}", delete(system::kill_process))
         .route("/system/swap", post(system::configure_swap))
+        .route("/system/power", post(system::power_action))
         .route("/system/audit", get(system::get_audit_logs))
         .route("/nodes", get(system::list_nodes))
         // Files

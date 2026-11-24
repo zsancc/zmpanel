@@ -32,6 +32,12 @@ pub struct SwapRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct PowerActionRequest {
+    /// "panel" | "server"
+    pub target: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct AuditQuery {
     pub limit: Option<usize>,
 }
@@ -111,6 +117,98 @@ pub async fn configure_swap(
         &msg,
     );
     Ok(Json(ApiResponse::success(msg)))
+}
+
+pub async fn power_action(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(payload): Json<PowerActionRequest>,
+) -> ServerResult<Json<ApiResponse<String>>> {
+    let target = payload.target.trim().to_lowercase();
+    match target.as_str() {
+        "panel" => {
+            let _ = state.db.write_audit(
+                &auth.user.username,
+                &auth.client_ip,
+                "system.restart_panel",
+                "zmpanel",
+                "触发重启面板服务",
+            );
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+                #[cfg(target_os = "linux")]
+                {
+                    use std::process::Command;
+                    let is_systemd = Command::new("systemctl")
+                        .args(["is-active", "--quiet", "zmpanel"])
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    if is_systemd {
+                        let _ = Command::new("systemctl")
+                            .args(["restart", "zmpanel"])
+                            .status();
+                        return;
+                    }
+                    let is_openrc = Command::new("rc-service")
+                        .args(["zmpanel", "status"])
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    if is_openrc {
+                        let _ = Command::new("rc-service")
+                            .args(["zmpanel", "restart"])
+                            .status();
+                        return;
+                    }
+                    // Fallback: exit cleanly so supervisor (systemd Restart=always / container) restarts it
+                    std::process::exit(0);
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    std::process::exit(0);
+                }
+            });
+            Ok(Json(ApiResponse::success(
+                "已下发重启面板指令，约 2~3 秒后自动恢复连接".to_string(),
+            )))
+        }
+        "server" => {
+            #[cfg(not(target_os = "linux"))]
+            {
+                return Err(AppError::BadRequest(
+                    "重启服务器仅支持 Linux 生产环境（Debian / Ubuntu / Alpine）".to_string(),
+                )
+                .into());
+            }
+            #[cfg(target_os = "linux")]
+            {
+                let _ = state.db.write_audit(
+                    &auth.user.username,
+                    &auth.client_ip,
+                    "system.reboot_server",
+                    "host",
+                    "触发重启服务器系统",
+                );
+                tokio::spawn(async {
+                    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+                    use std::process::Command;
+                    let ok = Command::new("systemctl")
+                        .arg("reboot")
+                        .status()
+                        .map(|s| s.success())
+                        .unwrap_or(false);
+                    if !ok {
+                        let _ = Command::new("reboot").status();
+                    }
+                });
+                Ok(Json(ApiResponse::success(
+                    "已下发服务器系统重启指令，预计 30~60 秒后恢复访问".to_string(),
+                )))
+            }
+        }
+        _ => Err(AppError::BadRequest("target 仅支持 panel 或 server".to_string()).into()),
+    }
 }
 
 pub async fn get_audit_logs(

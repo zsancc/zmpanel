@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { Bell, Download, KeyRound, Lock, Palette, ScrollText, Shield, ShieldCheck } from 'lucide-vue-next'
+import { Bell, Download, KeyRound, Lock, Palette, Power, RotateCw, ScrollText, Shield, ShieldCheck } from 'lucide-vue-next'
 import { apiRequest, formatTimestamp } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { ACCENT_PRESETS, THEME_PRESETS, useThemeStore } from '@/stores/theme'
@@ -196,6 +196,24 @@ async function applySelfUpdate() {
   }
 }
 
+async function triggerPower(target: 'panel' | 'server') {
+  const tip =
+    target === 'panel'
+      ? '确定重启 zmpanel 面板服务吗？（约 2~3 秒后恢复）'
+      : '危险操作：确定立即重启整台服务器系统吗？（30~60 秒中断）'
+  if (!window.confirm(tip)) return
+  setMsg('')
+  try {
+    const msg = await apiRequest<string>('/system/power', {
+      method: 'POST',
+      body: JSON.stringify({ target }),
+    })
+    setMsg(msg)
+  } catch (err: any) {
+    setMsg('', err?.message || '触发重启失败')
+  }
+}
+
 onMounted(() => {
   securityEntry.value = auth.profile?.security_entry?.replace(/^\/+/, '') || ''
   loadAuditLogs()
@@ -205,11 +223,21 @@ onMounted(() => {
 
 <template>
   <div class="space-y-5 max-w-5xl">
-    <div>
-      <h1 class="text-lg font-bold">面板设置与安全</h1>
-      <p class="text-xs mt-0.5" style="color: var(--zm-text-muted)">
-        完全离线本地配置 · 零遥测零上传 · 多套高颜值主题自由切换
-      </p>
+    <div class="flex flex-wrap items-center justify-between gap-3">
+      <div>
+        <h1 class="text-lg font-bold">面板设置与安全</h1>
+        <p class="text-xs mt-0.5" style="color: var(--zm-text-muted)">
+          完全离线本地配置 · 零遥测零上传 · 多套高颜值主题自由切换
+        </p>
+      </div>
+      <div class="flex items-center gap-2">
+        <button class="zm-btn text-xs" @click="triggerPower('panel')">
+          <RotateCw class="h-3.5 w-3.5" style="color: var(--zm-accent)" /> 重启面板
+        </button>
+        <button class="zm-btn zm-btn-danger text-xs" @click="triggerPower('server')">
+          <Power class="h-3.5 w-3.5" /> 重启服务器
+        </button>
+      </div>
     </div>
 
     <div v-if="feedback" class="zm-card p-3 text-xs" style="border-color: var(--zm-accent); color: var(--zm-accent)">

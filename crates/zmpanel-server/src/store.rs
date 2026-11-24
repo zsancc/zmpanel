@@ -210,19 +210,35 @@ pub fn list_store_apps(store_dir: &Path) -> Vec<StoreAppItem> {
         .collect()
 }
 
+fn resolve_binary_candidates(bin: &str) -> Vec<String> {
+    #[allow(unused_mut)]
+    let mut list = vec![bin.to_string()];
+    #[cfg(target_os = "linux")]
+    {
+        if bin == "uv" {
+            list.push("/usr/local/bin/uv".to_string());
+            list.push("/root/.local/bin/uv".to_string());
+            if let Ok(home) = std::env::var("HOME") {
+                list.push(format!("{}/.local/bin/uv", home.trim_end_matches('/')));
+            }
+        }
+    }
+    list
+}
+
 fn probe_binary(bin: &str, args: &[String]) -> (bool, String) {
-    match Command::new(bin).args(args).output() {
-        Ok(out) => {
+    for candidate in resolve_binary_candidates(bin) {
+        if let Ok(out) = Command::new(&candidate).args(args).output() {
             let text = if !out.stdout.is_empty() {
                 String::from_utf8_lossy(&out.stdout).to_string()
             } else {
                 String::from_utf8_lossy(&out.stderr).to_string()
             };
             let first_line = text.lines().next().unwrap_or("").trim().to_string();
-            (true, first_line)
+            return (true, first_line);
         }
-        Err(_) => (false, String::new()),
     }
+    (false, String::new())
 }
 
 pub fn install_native_app(app_id: &str) -> Result<String, AppError> {
@@ -238,6 +254,9 @@ pub fn install_native_app(app_id: &str) -> Result<String, AppError> {
     {
         if app_id == "docker" {
             return crate::docker::install_docker_engine();
+        }
+        if app_id == "python-uv" {
+            return install_uv_linux();
         }
         let os = detect_os_family();
         let pkg = match (os.as_str(), app_id) {
@@ -289,6 +308,104 @@ pub fn install_native_app(app_id: &str) -> Result<String, AppError> {
             Err(AppError::BadRequest(format!("安装失败:\n{}", combined)))
         }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn install_uv_linux() -> Result<String, AppError> {
+    use flate2::read::GzDecoder;
+    use std::os::unix::fs::PermissionsExt;
+
+    let arch_triple = match std::env::consts::ARCH {
+        "x86_64" => "x86_64-unknown-linux-musl",
+        "aarch64" => "aarch64-unknown-linux-musl",
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "暂不支持该 CPU 架构一键安装 uv: {}",
+                other
+            )));
+        }
+    };
+    let url = format!(
+        "https://github.com/astral-sh/uv/releases/latest/download/uv-{}.tar.gz",
+        arch_triple
+    );
+    let tmp_tar = std::env::temp_dir().join("zmpanel-uv-install.tar.gz");
+    let _ = fs::remove_file(&tmp_tar);
+
+    let dl = Command::new("curl")
+        .args([
+            "-fsSL",
+            "--connect-timeout",
+            "15",
+            "--max-time",
+            "180",
+            "-o",
+            &tmp_tar.to_string_lossy(),
+            &url,
+        ])
+        .output()
+        .map_err(|e| AppError::Internal(format!("调用 curl 下载 uv 失败: {}", e)))?;
+
+    if !dl.status.success() {
+        let _ = fs::remove_file(&tmp_tar);
+        return Err(AppError::BadRequest(format!(
+            "下载 uv 静态包失败 ({}): {}",
+            url,
+            String::from_utf8_lossy(&dl.stderr).trim()
+        )));
+    }
+
+    let file = fs::File::open(&tmp_tar)
+        .map_err(|e| AppError::Internal(format!("打开下载包失败: {}", e)))?;
+    let mut archive = tar::Archive::new(GzDecoder::new(file));
+    let mut installed_bins = Vec::new();
+    for entry_res in archive
+        .entries()
+        .map_err(|e| AppError::Internal(format!("解析 uv 压缩包失败: {}", e)))?
+    {
+        let mut entry = entry_res.map_err(|e| AppError::Internal(e.to_string()))?;
+        let path = entry
+            .path()
+            .map_err(|e| AppError::Internal(e.to_string()))?
+            .into_owned();
+        let fname = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+        if fname == "uv" || fname == "uvx" {
+            let dest = PathBuf::from("/usr/local/bin").join(fname);
+            let mut out = fs::File::create(&dest).map_err(|e| {
+                AppError::Forbidden(format!("写入 {} 失败（需 root 权限）: {}", dest.display(), e))
+            })?;
+            std::io::copy(&mut entry, &mut out)
+                .map_err(|e| AppError::Internal(format!("解压 {} 失败: {}", fname, e)))?;
+            fs::set_permissions(&dest, fs::Permissions::from_mode(0o755))
+                .map_err(|e| AppError::Internal(e.to_string()))?;
+            installed_bins.push(dest.to_string_lossy().to_string());
+        }
+    }
+    let _ = fs::remove_file(&tmp_tar);
+
+    if installed_bins.is_empty() {
+        return Err(AppError::Internal("未在压缩包中找到 uv 可执行文件".to_string()));
+    }
+    let (_, ver) = probe_binary("uv", &["--version".to_string()]);
+    Ok(format!(
+        "已通过官方静态包安装 uv ({}) 至 {}",
+        ver,
+        installed_bins.join(", ")
+    ))
+}
+
+fn find_uv_bin() -> String {
+    for candidate in resolve_binary_candidates("uv") {
+        if Command::new(&candidate)
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+        {
+            return candidate;
+        }
+    }
+    "uv".to_string()
 }
 
 // ---------- Nginx Security & Config Engine ----------
@@ -395,7 +512,8 @@ pub fn uv_status() -> (bool, String, String) {
     if !ok {
         return (false, String::new(), String::new());
     }
-    let py_list = Command::new("uv")
+    let uv_bin = find_uv_bin();
+    let py_list = Command::new(&uv_bin)
         .args(["python", "list", "--only-installed"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
@@ -408,7 +526,8 @@ pub fn uv_install_python(version: &str) -> Result<String, AppError> {
     if clean.is_empty() || !clean.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-')) {
         return Err(AppError::BadRequest("无效的 Python 版本号（例如 3.12 或 3.13）".to_string()));
     }
-    let out = Command::new("uv")
+    let uv_bin = find_uv_bin();
+    let out = Command::new(&uv_bin)
         .args(["python", "install", clean])
         .output()
         .map_err(|e| AppError::BadRequest(format!("无法调用 uv（请确认已安装 uv）: {}", e)))?;
@@ -437,7 +556,8 @@ pub fn uv_create_venv(path_raw: &str, python_version: &str) -> Result<String, Ap
         args.push("--python".to_string());
         args.push(python_version.trim().to_string());
     }
-    let out = Command::new("uv")
+    let uv_bin = find_uv_bin();
+    let out = Command::new(&uv_bin)
         .args(&args)
         .output()
         .map_err(|e| AppError::BadRequest(format!("无法调用 uv 创建虚拟环境: {}", e)))?;
@@ -484,7 +604,8 @@ pub fn uv_pip_install(venv_path: &str, packages: &[String], index_url: Option<&s
         }
     }
 
-    let out = Command::new("uv")
+    let uv_bin = find_uv_bin();
+    let out = Command::new(&uv_bin)
         .args(&args)
         .output()
         .map_err(|e| AppError::BadRequest(format!("无法调用 uv pip install: {}", e)))?;

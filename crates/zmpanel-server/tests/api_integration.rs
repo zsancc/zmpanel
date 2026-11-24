@@ -955,6 +955,22 @@ async fn test_stage3_firewall_security_ips_logs_cron_and_db_store() {
     let vw_json = read_json(vw_get).await;
     assert_eq!(vw_json["data"]["enabled"], true);
     assert_eq!(vw_json["data"]["alert_min_severity"], "high");
+
+    // Power action endpoint validates target strictly (rejects unknown target without rebooting)
+    let bad_power = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/zm_secret/api/system/power")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, &auth_hdr)
+                .body(Body::from(json!({"target": "invalid"}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(bad_power.status(), StatusCode::BAD_REQUEST);
     assert_eq!(sec_json["data"]["bans"].as_array().unwrap().len(), 3);
 
     // 3. Log Center: tail with keyword filter + truncate in-place

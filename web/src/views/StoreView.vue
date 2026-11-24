@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { AlertTriangle, Box, CheckCircle2, Database, Download, Plus, RefreshCw, Shield, Store, Terminal, Trash2 } from 'lucide-vue-next'
 import { apiRequest } from '@/api/client'
@@ -43,11 +43,23 @@ interface PythonVenvItem {
 const router = useRouter()
 const activeTab = ref<'catalog' | 'nginx' | 'uv' | 'db'>('catalog')
 const apps = ref<StoreAppItem[]>([])
+const dockerAvailable = ref(false)
 const dockerNestingSupported = ref(true)
 const dockerEnvNotice = ref('')
 const notice = ref('')
 const errorMsg = ref('')
 const busy = ref(false)
+const installingId = ref('')
+
+const isAppInstalled = (id: string) => apps.value.some((a) => a.id === id && a.installed)
+const nginxInstalled = computed(() => isAppInstalled('nginx'))
+const anyDbConfigurable = computed(
+  () =>
+    dockerAvailable.value ||
+    isAppInstalled('redis') ||
+    isAppInstalled('postgresql') ||
+    isAppInstalled('mongodb'),
+)
 
 // Redis / PostgreSQL / MongoDB service configs
 const activeDbSub = ref<'redis' | 'postgresql' | 'mongodb'>('redis')
@@ -129,14 +141,15 @@ async function loadAll() {
       apiRequest<{ config: typeof redisCfg.value; rendered_compose: string }>('/store/services/redis'),
       apiRequest<{ config: typeof pgCfg.value; rendered_compose: string }>('/store/services/postgresql'),
       apiRequest<{ config: typeof mongoCfg.value; rendered_compose: string }>('/store/services/mongodb'),
-      apiRequest<{ env?: { docker_nesting_supported: boolean; virt_label: string; docker_nesting_reason: string } }>('/docker/status').catch(() => null),
+      apiRequest<{ available?: boolean; env?: { docker_nesting_supported: boolean; virt_label: string; docker_nesting_reason: string } }>('/docker/status').catch(() => null),
     ])
     apps.value = a
+    dockerAvailable.value = Boolean(dk?.available)
     if (dk?.env) {
       dockerNestingSupported.value = dk.env.docker_nesting_supported
       dockerEnvNotice.value = dk.env.docker_nesting_supported
         ? ''
-        : `当前为「${dk.env.virt_label}」，不支持嵌套运行 Docker。请优先在「应用列表」中使用原生包安装，或仅将生成的配置保存用于其他宿主机。`
+        : `当前为「${dk.env.virt_label}」，不支持嵌套运行 Docker。请优先在「全部软件」中使用原生包安装，或仅将生成的配置保存用于其他宿主机。`
     }
     nginxCfg.value = n.config
     blockedIpsText.value = (n.config.blocked_ips || []).join('\n')
@@ -190,6 +203,7 @@ async function sendToDockerWorkspace(svc: 'redis' | 'postgresql' | 'mongodb') {
 
 async function installApp(app: StoreAppItem) {
   busy.value = true
+  installingId.value = app.id
   errorMsg.value = ''
   try {
     const out = await apiRequest<string>(`/store/apps/${app.id}/install`, { method: 'POST' })
@@ -199,6 +213,7 @@ async function installApp(app: StoreAppItem) {
     errorMsg.value = err?.message || '安装失败'
   } finally {
     busy.value = false
+    installingId.value = ''
   }
 }
 
@@ -324,13 +339,28 @@ onMounted(loadAll)
       <button class="zm-btn !py-1.5 text-xs" :class="{ 'zm-btn-primary': activeTab === 'catalog' }" @click="activeTab = 'catalog'">
         全部软件 ({{ apps.length }})
       </button>
-      <button class="zm-btn !py-1.5 text-xs" :class="{ 'zm-btn-primary': activeTab === 'nginx' }" @click="activeTab = 'nginx'">
+      <button
+        v-if="nginxInstalled"
+        class="zm-btn !py-1.5 text-xs"
+        :class="{ 'zm-btn-primary': activeTab === 'nginx' }"
+        @click="activeTab = 'nginx'"
+      >
         <Shield class="h-3.5 w-3.5" /> Nginx 安全与性能设置
       </button>
-      <button class="zm-btn !py-1.5 text-xs" :class="{ 'zm-btn-primary': activeTab === 'uv' }" @click="activeTab = 'uv'">
+      <button
+        v-if="uvInstalled"
+        class="zm-btn !py-1.5 text-xs"
+        :class="{ 'zm-btn-primary': activeTab === 'uv' }"
+        @click="activeTab = 'uv'"
+      >
         <Terminal class="h-3.5 w-3.5" /> Python 管理器 (uv)
       </button>
-      <button class="zm-btn !py-1.5 text-xs" :class="{ 'zm-btn-primary': activeTab === 'db' }" @click="activeTab = 'db'">
+      <button
+        v-if="anyDbConfigurable"
+        class="zm-btn !py-1.5 text-xs"
+        :class="{ 'zm-btn-primary': activeTab === 'db' }"
+        @click="activeTab = 'db'"
+      >
         <Database class="h-3.5 w-3.5" /> Redis / PostgreSQL / MongoDB
       </button>
     </div>
@@ -376,34 +406,50 @@ onMounted(loadAll)
         <div class="flex items-center justify-between pt-2 border-t" style="border-color: var(--zm-border)">
           <span class="text-[11px] opacity-60">模式: {{ app.install_modes.join(' / ') }}</span>
           <div class="flex gap-1.5">
+            <!-- Only show management/config actions AFTER the software is actually installed -->
             <button
-              v-if="app.id === 'nginx'"
+              v-if="app.installed && app.id === 'docker'"
+              class="zm-btn zm-btn-primary !py-1 !px-2.5 text-xs"
+              @click="router.push('/docker')"
+            >
+              进入工作区
+            </button>
+            <button
+              v-else-if="app.installed && app.id === 'nginx'"
               class="zm-btn zm-btn-primary !py-1 !px-2.5 text-xs"
               @click="activeTab = 'nginx'"
             >
               打开设置
             </button>
             <button
-              v-else-if="app.id === 'python-uv'"
+              v-else-if="app.installed && app.id === 'python-uv'"
               class="zm-btn zm-btn-primary !py-1 !px-2.5 text-xs"
               @click="activeTab = 'uv'"
             >
               打开管理
             </button>
             <button
-              v-else-if="app.id === 'redis' || app.id === 'postgresql' || app.id === 'mongodb'"
+              v-else-if="app.installed && (app.id === 'redis' || app.id === 'postgresql' || app.id === 'mongodb')"
               class="zm-btn zm-btn-primary !py-1 !px-2.5 text-xs"
               @click="activeDbSub = app.id; activeTab = 'db'"
             >
-              配置与部署
+              打开设置
+            </button>
+            <!-- When not natively installed: allow Docker deploy ONLY if Docker engine is already running -->
+            <button
+              v-else-if="!app.installed && dockerAvailable && (app.id === 'redis' || app.id === 'postgresql' || app.id === 'mongodb')"
+              class="zm-btn !py-1 !px-2.5 text-xs"
+              @click="activeDbSub = app.id; activeTab = 'db'"
+            >
+              <Box class="h-3 w-3" /> Docker 部署
             </button>
             <button
-              v-if="!app.installed && app.id !== 'python-uv'"
-              class="zm-btn !py-1 !px-2.5 text-xs"
-              :disabled="busy"
+              v-if="!app.installed"
+              class="zm-btn zm-btn-primary !py-1 !px-2.5 text-xs"
+              :disabled="busy || (app.id === 'docker' && !dockerNestingSupported)"
               @click="installApp(app)"
             >
-              <Download class="h-3 w-3" /> 安装
+              <Download class="h-3 w-3" /> {{ installingId === app.id ? '安装中...' : '安装' }}
             </button>
           </div>
         </div>

@@ -14,6 +14,8 @@ import {
   LogOut,
   Menu,
   Palette,
+  Power,
+  RotateCw,
   ScrollText,
   Server,
   Settings,
@@ -47,6 +49,8 @@ const theme = useThemeStore()
 const collapsed = ref(false)
 const mobileOpen = ref(false)
 const themePickerOpen = ref(false)
+const powerMenuOpen = ref(false)
+const powerBusyText = ref('')
 const nodes = ref<NodeSummary[]>([])
 const activeNodeId = ref('local')
 
@@ -107,6 +111,39 @@ async function loadNodes() {
 async function handleLogout() {
   await auth.logout()
   router.replace({ name: 'login' })
+}
+
+async function triggerPower(target: 'panel' | 'server') {
+  powerMenuOpen.value = false
+  const msg =
+    target === 'panel'
+      ? '确定要重启 zmpanel 面板服务吗？（约 2~3 秒后自动重连，不影响网站和容器运行）'
+      : '危险操作：确定要立即重启整台服务器系统吗？（所有正在运行的服务与 SSH 连接都会中断 30~60 秒）'
+  if (!window.confirm(msg)) return
+
+  try {
+    const res = await apiRequest<string>('/system/power', {
+      method: 'POST',
+      body: JSON.stringify({ target }),
+    })
+    powerBusyText.value = res
+    // Poll auth status until server comes back online
+    const waitInitial = target === 'panel' ? 2000 : 10000
+    setTimeout(() => {
+      const poll = window.setInterval(async () => {
+        try {
+          await apiRequest('/auth/status')
+          window.clearInterval(poll)
+          powerBusyText.value = ''
+          window.location.reload()
+        } catch {
+          // still restarting
+        }
+      }, 2000)
+    }, waitInitial)
+  } catch (err: any) {
+    window.alert(err?.message || '触发重启失败')
+  }
 }
 
 function isActive(to: string) {
@@ -245,11 +282,48 @@ onMounted(() => {
         <div class="flex items-center gap-2 relative">
           <button
             class="zm-btn !py-1.5 !px-2.5 text-xs"
-            @click="themePickerOpen = !themePickerOpen"
+            title="重启面板或服务器"
+            @click="powerMenuOpen = !powerMenuOpen; themePickerOpen = false"
+          >
+            <Power class="h-4 w-4 text-amber-400" />
+            <span class="hidden sm:inline">重启</span>
+          </button>
+
+          <button
+            class="zm-btn !py-1.5 !px-2.5 text-xs"
+            @click="themePickerOpen = !themePickerOpen; powerMenuOpen = false"
           >
             <Palette class="h-4 w-4" style="color: var(--zm-accent)" />
             <span class="hidden sm:inline">主题</span>
           </button>
+
+          <!-- Quick power dropdown -->
+          <div
+            v-if="powerMenuOpen"
+            class="absolute right-16 top-11 z-50 w-52 p-2 shadow-xl zm-card space-y-1 text-xs"
+          >
+            <button
+              class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-left hover:bg-white/10 transition cursor-pointer"
+              @click="triggerPower('panel')"
+            >
+              <RotateCw class="h-3.5 w-3.5" style="color: var(--zm-accent)" />
+              <div>
+                <div class="font-medium">重启面板</div>
+                <div class="text-[10px] opacity-65">仅重启 zmpanel，2~3 秒恢复</div>
+              </div>
+            </button>
+            <button
+              class="w-full flex items-center gap-2 rounded-lg px-2.5 py-2 text-left hover:bg-rose-500/15 transition cursor-pointer"
+              style="color: var(--zm-danger)"
+              @click="triggerPower('server')"
+            >
+              <Power class="h-3.5 w-3.5" />
+              <div>
+                <div class="font-medium">重启服务器系统</div>
+                <div class="text-[10px] opacity-75">整机 reboot（内核补丁生效）</div>
+              </div>
+            </button>
+          </div>
 
           <div
             class="hidden sm:flex items-center gap-2 rounded-lg px-2.5 py-1 text-xs"
@@ -318,6 +392,14 @@ onMounted(() => {
 
       <!-- Page Content -->
       <main class="flex-1 overflow-y-auto p-4 lg:p-6">
+        <div
+          v-if="powerBusyText"
+          class="mb-4 zm-card p-3 text-xs flex items-center gap-2"
+          style="border-color: var(--zm-warning); color: var(--zm-warning)"
+        >
+          <RotateCw class="h-3.5 w-3.5 animate-spin shrink-0" />
+          <span>{{ powerBusyText }}（页面将在恢复连通后自动刷新）</span>
+        </div>
         <router-view />
       </main>
     </div>
