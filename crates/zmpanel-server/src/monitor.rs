@@ -247,15 +247,56 @@ pub fn kill_process(pid: u32) -> Result<(), AppError> {
     }
 }
 
+/// Write `size_mb` MiB of real zero bytes sequentially (never sparse `set_len` / `ftruncate`),
+/// guaranteeing no filesystem holes so Linux `swapon` works reliably on ext4, xfs, and btrfs.
+#[cfg(any(target_os = "linux", test))]
+fn write_zero_filled_file(path: &std::path::Path, size_mb: u64) -> Result<(), AppError> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|e| AppError::Forbidden(format!("创建 Swap 文件失败（需 root 权限）: {}", e)))?;
+
+    #[cfg(target_os = "linux")]
+    {
+        // Best-effort disable COW on btrfs before writing data; harmless no-op on ext4/xfs.
+        let _ = std::process::Command::new("chattr")
+            .args(["+C", &path.to_string_lossy()])
+            .output();
+    }
+
+    let zero_chunk = vec![0u8; 1024 * 1024];
+    for _ in 0..size_mb {
+        if let Err(e) = file.write_all(&zero_chunk) {
+            let _ = std::fs::remove_file(path);
+            return Err(AppError::Internal(format!(
+                "写入 Swap 空间失败（请检查磁盘剩余空间）: {}",
+                e
+            )));
+        }
+    }
+    if let Err(e) = file.sync_all() {
+        let _ = std::fs::remove_file(path);
+        return Err(AppError::Internal(format!("刷新 Swap 文件落盘失败: {}", e)));
+    }
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 pub fn configure_swap_file(size_mb: u64) -> Result<String, AppError> {
-    use std::fs::OpenOptions;
     use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
     use std::process::Command;
 
     let swap_path = "/swapfile.zmpanel";
-    // Disable existing zmpanel swapfile if active
-    let _ = Command::new("swapoff").arg(swap_path).status();
+    // Disable existing zmpanel swapfile quietly only if it already exists
+    if Path::new(swap_path).exists() {
+        let _ = Command::new("swapoff").arg(swap_path).output();
+    }
 
     if size_mb == 0 {
         let _ = std::fs::remove_file(swap_path);
@@ -266,14 +307,7 @@ pub fn configure_swap_file(size_mb: u64) -> Result<String, AppError> {
         return Err(AppError::BadRequest("单次 Swap 大小上限为 16384 MB".to_string()));
     }
 
-    let file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(swap_path)
-        .map_err(|e| AppError::Forbidden(format!("创建 Swap 文件失败（需 root 权限）: {}", e)))?;
-    file.set_len(size_mb * 1024 * 1024)
-        .map_err(|e| AppError::Internal(format!("分配 Swap 空间失败: {}", e)))?;
+    write_zero_filled_file(Path::new(swap_path), size_mb)?;
     std::fs::set_permissions(swap_path, std::fs::Permissions::from_mode(0o600))
         .map_err(|e| AppError::Internal(format!("设置 Swap 文件权限失败: {}", e)))?;
 
@@ -282,9 +316,10 @@ pub fn configure_swap_file(size_mb: u64) -> Result<String, AppError> {
         .output()
         .map_err(|e| AppError::Internal(format!("执行 mkswap 失败: {}", e)))?;
     if !mk.status.success() {
+        let _ = std::fs::remove_file(swap_path);
         return Err(AppError::Internal(format!(
             "mkswap 返回失败: {}",
-            String::from_utf8_lossy(&mk.stderr)
+            String::from_utf8_lossy(&mk.stderr).trim()
         )));
     }
 
@@ -293,9 +328,17 @@ pub fn configure_swap_file(size_mb: u64) -> Result<String, AppError> {
         .output()
         .map_err(|e| AppError::Internal(format!("执行 swapon 失败: {}", e)))?;
     if !on.status.success() {
+        let _ = std::fs::remove_file(swap_path);
+        let stderr = String::from_utf8_lossy(&on.stderr).trim().to_string();
+        let env = runtime_env::detect_runtime_env(false);
+        let hint = if env.inside_container {
+            format!("（当前运行在「{}」，宿主机可能限制容器开启 Swap）", env.virt_label)
+        } else {
+            String::new()
+        };
         return Err(AppError::Internal(format!(
-            "swapon 返回失败（部分 OpenVZ/LXC 容器宿主机限制开启 Swap）: {}",
-            String::from_utf8_lossy(&on.stderr)
+            "swapon 启用失败{}：{}",
+            hint, stderr
         )));
     }
 
@@ -307,4 +350,26 @@ pub fn configure_swap_file(_size_mb: u64) -> Result<String, AppError> {
     Err(AppError::BadRequest(
         "Swap 文件管理仅支持 Linux 服务器环境（Debian / Ubuntu / Alpine）".to_string(),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_zero_filled_file_allocates_real_blocks_without_holes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("swapfile.test");
+        write_zero_filled_file(&path, 2).expect("write 2MB swapfile");
+        let meta = std::fs::metadata(&path).expect("metadata");
+        assert_eq!(meta.len(), 2 * 1024 * 1024);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert!(
+                meta.blocks() * 512 >= meta.len(),
+                "swapfile must have real allocated blocks without sparse holes"
+            );
+        }
+    }
 }
